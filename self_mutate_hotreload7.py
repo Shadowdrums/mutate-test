@@ -21,20 +21,20 @@ from rich.live import Live
 from rich import box
 
 # ---------------- CONFIG ----------------
-MODEL_NAME = os.environ.get("AI_MODEL", "starcoder2:15b") # model can be changed to any ollama model desired
-REFRESH_INTERVAL = 1.0
-AI_CADENCE = 6
-SHOW_MAX_CONNS = 30
+MODEL_NAME = os.environ.get("AI_MODEL", "deepseek-coder-v2:16b")
+REFRESH_INTERVAL = 0.25
+AI_CADENCE = 7
+SHOW_MAX_CONNS = 100
 HIDE_BIND_ADDRS = True
 HISTORY_LEN = 12
-AI_TIMEOUT_SEC = 180
-AI_COOLDOWN_SEC = 25
+AI_TIMEOUT_SEC = 120
+AI_COOLDOWN_SEC = 30
 
 console = Console()
 tick = 0
 pid_name_cache = {}
 
-SUSPICION_THRESHOLDS = {"user_score":1,"conn_score":2,"tor_score":3}
+SUSPICION_THRESHOLDS = {"user_score":1,"conn_score":3,"tor_score":5}
 ALLOWED_MODIFIABLES = {"REFRESH_INTERVAL","AI_CADENCE","SHOW_MAX_CONNS","HIDE_BIND_ADDRS","SUSPICION_THRESHOLDS"}
 
 ai_lock = threading.Lock()
@@ -333,11 +333,9 @@ def safe_apply_ai_update(suggestion: str):
         i += 1
 
     return applied
-
+    
 def ai_worker_loop():
     global last_ai_output
-    spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-    idx = 0
     last_valid_output = "[AI] Booting up..."
 
     while True:
@@ -353,11 +351,7 @@ def ai_worker_loop():
                 f"Conns={len(conns)} GPU={[g['util'] for g in gpus]}"
             )
 
-            # show spinner only in console/debug, not in panel
-            with ai_lock:
-                last_ai_output = last_valid_output
-
-            # run model
+            # Run model
             prompt = ai_prompt_text(ctx)
             cmd = ["ollama", "run", MODEL_NAME]
             result = subprocess.run(
@@ -379,12 +373,8 @@ def ai_worker_loop():
                 if applied:
                     display.append("Applied:\n" + "\n".join(applied))
 
-                if display:
-                    last_valid_output = "[AI] Analysis complete.\n" + "\n".join(display)
-                else:
-                    last_valid_output = "[AI] No useful output"
+                last_valid_output = "[AI] Analysis complete.\n" + ("\n".join(display) if display else "[AI] No useful output")
 
-            # update visible panel
             with ai_lock:
                 last_ai_output = last_valid_output
 
