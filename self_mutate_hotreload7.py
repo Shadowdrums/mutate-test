@@ -5,7 +5,8 @@ ShadowTEAM Live Monitor (Fixed & Improved)
 - Live dashboard with Rich (10 FPS)
 - Continuous AI updates
 - Connection type inference + scoring
-- Correct GPU VRAM reporting
+- Correct GPU VRAM reporting (not really but kinda)
+- Better AI utilization
 """
 
 import os, re, ast, socket, subprocess, threading, time, getpass, platform
@@ -27,7 +28,8 @@ AI_CADENCE = 6
 SHOW_MAX_CONNS = 30
 HIDE_BIND_ADDRS = True
 HISTORY_LEN = 12
-AI_TIMEOUT_SEC = 60
+AI_TIMEOUT_SEC = 180
+AI_COOLDOWN_SEC = 25
 
 console = Console()
 tick = 0
@@ -37,7 +39,7 @@ SUSPICION_THRESHOLDS = {"user_score":1,"conn_score":2,"tor_score":3}
 ALLOWED_MODIFIABLES = {"REFRESH_INTERVAL","AI_CADENCE","SHOW_MAX_CONNS","HIDE_BIND_ADDRS","SUSPICION_THRESHOLDS"}
 
 ai_lock = threading.Lock()
-last_ai_output = "[AI idle]"
+last_ai_output = "[AI] Running..."
 ai_history = deque(maxlen=HISTORY_LEN)
 
 # ---------------- HELPERS ----------------
@@ -201,109 +203,195 @@ def detect_connections(max_rows=SHOW_MAX_CONNS):
     return conns[:max_rows]
 
 # ---------------- AI ----------------
-def ai_prompt_text():
-    """
-    The AI is instructed to return Python code assignments OR
-    new function definitions as strings. It cannot use imports,
-    filesystem, or dangerous operations.
-    """
-    monitored_funcs = ["suspicious_score", "infer_protocol", "gpu_info"]
-    return f"""
-You are a continuous system monitoring AI. respond with Python assignments
-or small responses on system overview: {monitored_funcs}
-
-REFRESH_INTERVAL = {REFRESH_INTERVAL}
-SUSPICION_THRESHOLDS = {SUSPICION_THRESHOLDS}
-SHOW_MAX_CONNS = {SHOW_MAX_CONNS}
+AI_SYSTEM_PROMPT = """
+You are ShadowTEAM's embedded AI analyst.
+- You analyze system metrics and network activity.
+- You may suggest Python config updates (REFRESH_INTERVAL, SHOW_MAX_CONNS, SUSPICION_THRESHOLDS).
+- You may also provide commentary: insights, warnings, or trends.
+- Keep responses short, precise, and cyberpunk-ops style.
+- You monitor the network for anomalies, report and if needed react and stop threats atonomisly.
+- You monitor user activities and report suspicious activities.
+- You Monitor system hardware usuage and modify yourself to better utilize hardware without conflicting with the systems daily use.
 """
+
+def ai_prompt_text(context: str):
+    return f"""{AI_SYSTEM_PROMPT}
+
+Live context:
+{context}
+
+Current config:
+REFRESH_INTERVAL = {REFRESH_INTERVAL}
+SHOW_MAX_CONNS = {SHOW_MAX_CONNS}
+SUSPICION_THRESHOLDS = {SUSPICION_THRESHOLDS}
+
+Respond with either:
+1. Python assignments/function defs to optimize system
+2. OR a short analysis string
+3. OR both
+"""
+
+def parse_ai_output(suggestion: str):
+    """Split AI output into code vs commentary"""
+    code, commentary = [], []
+    for line in suggestion.splitlines():
+        if line.strip().startswith("#") or line.strip().startswith("def ") or "=" in line:
+            code.append(line)
+        else:
+            commentary.append(line)
+    return "\n".join(code), "\n".join(commentary).strip()
+
+def sanitize_ai_suggestion(suggestion: str) -> str:
+    """
+    Return only safe Python code: assignments or function definitions.
+    Ignore all text, documentation, markdown, etc.
+    """
+    safe_lines = []
+    lines = suggestion.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        if not line or line.startswith("#"):
+            i += 1
+            continue
+
+        # Function definition
+        if line.startswith("def "):
+            func_block = [lines[i]]
+            indent_level = len(lines[i]) - len(lines[i].lstrip())
+            i += 1
+            # Collect function body
+            while i < len(lines):
+                current_indent = len(lines[i]) - len(lines[i].lstrip())
+                if current_indent > indent_level or lines[i].strip() == "":
+                    func_block.append(lines[i])
+                    i += 1
+                else:
+                    break
+            safe_lines.extend(func_block)
+            continue
+
+        # Variable assignment
+        if "=" in line:
+            try:
+                node = ast.parse(line, mode="exec")
+                if isinstance(node.body[0], ast.Assign):
+                    safe_lines.append(line)
+            except Exception:
+                pass
+
+        i += 1
+
+    return "\n".join(safe_lines)
 
 def safe_apply_ai_update(suggestion: str):
     """
-    Apply configuration updates and optionally replace functions.
-    Functions are applied in memory via exec().
+    Apply only safe Python code from AI suggestions:
+    - function definitions (def ...)
+    - variable assignments (single line)
+    Ignore everything else (imports, prompts, markdown, etc.)
     """
-    global REFRESH_INTERVAL, AI_CADENCE, SHOW_MAX_CONNS, HIDE_BIND_ADDRS, SUSPICION_THRESHOLDS
     applied = []
-
-    for line in suggestion.splitlines():
-        line = line.strip()
+    lines = suggestion.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
         if not line or line.startswith("#"):
+            i += 1
             continue
 
-        # Check if it's a function definition
+        # Function definitions
         if line.startswith("def "):
-            func_name = re.match(r"def\s+(\w+)\s*\(", line)
-            if func_name:
-                func_name = func_name.group(1)
-                try:
-                    # Collect full function code block
-                    func_lines = [line]
-                    indent_level = len(line) - len(line.lstrip())
-                    # Append subsequent lines indented more than function definition
-                    in_func = True
-                    for l in suggestion.splitlines()[suggestion.splitlines().index(line)+1:]:
-                        if l.strip() == "":
-                            func_lines.append(l)
-                            continue
-                        if len(l) - len(l.lstrip()) > indent_level:
-                            func_lines.append(l)
-                        else:
-                            break
-                    func_code = "\n".join(func_lines)
-                    exec(func_code, globals())
-                    applied.append(f"[Function updated] {func_name}")
-                except Exception as e:
-                    applied.append(f"# Failed to apply function {func_name}: {e}")
+            func_block = [line]
+            indent_level = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                current_line = lines[i]
+                current_indent = len(current_line) - len(current_line.lstrip())
+                if current_indent > indent_level or current_line.strip() == "":
+                    func_block.append(current_line)
+                    i += 1
+                else:
+                    break
+            func_code = "\n".join(func_block)
+            try:
+                exec(func_code, globals())
+                applied.append(f"[Function applied] {func_block[0]}")
+            except Exception as e:
+                applied.append(f"# Failed to apply function {func_block[0]}: {e}")
             continue
 
-        # Otherwise treat as variable assignment
-        try:
-            node = ast.parse(line, mode="exec")
-            if not node.body or not isinstance(node.body[0], ast.Assign):
-                continue
-            assign = node.body[0]
-            target = assign.targets[0]
-            if isinstance(target, ast.Name) and target.id in ALLOWED_MODIFIABLES:
-                val = ast.literal_eval(assign.value)
-                globals()[target.id] = val
-                applied.append(f"{target.id}={val}")
-            elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in ALLOWED_MODIFIABLES:
-                key_node = target.slice
-                if isinstance(key_node, ast.Index): key_node = key_node.value
-                key = ast.literal_eval(key_node)
-                val = ast.literal_eval(assign.value)
-                globals()[target.value.id][key] = val
-                applied.append(f"{target.value.id}[{key}]={val}")
-        except Exception as e:
-            applied.append(f"# Failed to apply line: {line} ({e})")
+        # Variable assignment (single line only)
+        if "=" in line:
+            try:
+                node = ast.parse(line, mode="exec")
+                if isinstance(node.body[0], ast.Assign):
+                    exec(line, globals())
+                    applied.append(line)
+            except Exception as e:
+                applied.append(f"# Failed to apply line: {line} ({e})")
+        
+        # Ignore everything else
+        i += 1
 
     return applied
 
 def ai_worker_loop():
     global last_ai_output
+    spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    idx = 0
     while True:
         try:
-            prompt = ai_prompt_text()
+            # Live context for AI
+            sysi = system_info()
+            usage = usage_info()
+            gpus = gpu_info()
+            conns = detect_connections(10)
+
+            ctx = (
+                f"CPU={usage['cpu_total']}% RAM={usage['ram_pct']}% Disk={usage['disk_pct']}% "
+                f"Conns={len(conns)} GPU={[g['util'] for g in gpus]}"
+            )
+
+            with ai_lock:
+                last_ai_output = f"[AI] Waiting {spinner[idx]}"
+            idx = (idx + 1) % len(spinner)
+
+            # ✅ Pass context
+            prompt = ai_prompt_text(ctx)
             cmd = ["ollama", "run", MODEL_NAME]
             result = subprocess.run(
                 cmd,
-                input=prompt,            # send prompt via stdin
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=AI_TIMEOUT_SEC
             )
             suggestion = (result.stdout + "\n" + result.stderr).strip()
             if not suggestion:
-                suggestion = "# No suggestion\nREFRESH_INTERVAL={}".format(REFRESH_INTERVAL)
-            applied = safe_apply_ai_update(suggestion)
+                suggestion = f"# No suggestion\nREFRESH_INTERVAL={REFRESH_INTERVAL}"
+
+            # Separate code and commentary
+            code, commentary = parse_ai_output(suggestion)
+            applied = safe_apply_ai_update(code) if code else []
+
+            # Update displayed AI output
+            display = []
+            if commentary:
+                display.append(commentary)
+            if applied:
+                display.append("Applied:\n" + "\n".join(applied))
+
             with ai_lock:
-                last_ai_output = "[AI] Analysis complete.\nApplied:\n" + "\n".join(applied)
+                last_ai_output = "[AI] Analysis complete.\n" + "\n".join(display) if display else "[AI] No useful output"
+
         except Exception as e:
             with ai_lock:
                 last_ai_output = f"[AI] Error: {e}"
-        time.sleep(120)
 
-# Start AI in background
+        time.sleep(AI_COOLDOWN_SEC)
+
+# Start AI thread
 threading.Thread(target=ai_worker_loop, daemon=True).start()
 
 # ---------------- RENDER ----------------
