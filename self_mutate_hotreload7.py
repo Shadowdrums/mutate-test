@@ -21,7 +21,7 @@ from rich.live import Live
 from rich import box
 
 # ---------------- CONFIG ----------------
-MODEL_NAME = os.environ.get("AI_MODEL", "deepseek-coder-v2:16b")
+MODEL_NAME = os.environ.get("AI_MODEL", "deepseek-coder-v2:16b") # can be changed to any model prefered
 REFRESH_INTERVAL = 0.25
 AI_CADENCE = 7
 SHOW_MAX_CONNS = 100
