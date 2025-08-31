@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ShadowTEAM Live Monitor (Fixed & Improved)
-- Live dashboard with Rich (10 FPS)
+ShadowTEAM Live Monitor (Enhanced Animations & Colors)
+- Smooth dashboard with Rich (10 FPS)
 - Continuous AI updates
 - Connection type inference + scoring
-- Correct GPU VRAM reporting (not really but kinda)
-- Better AI utilization
+- Better color gradients & readability
 """
 
 import os, re, ast, socket, subprocess, threading, time, getpass, platform
@@ -22,7 +21,7 @@ from rich.live import Live
 from rich import box
 
 # ---------------- CONFIG ----------------
-MODEL_NAME = os.environ.get("AI_MODEL", "starcoder2:15b")
+MODEL_NAME = os.environ.get("AI_MODEL", "starcoder2:15b") # model can be changed to any ollama model desired
 REFRESH_INTERVAL = 1.0
 AI_CADENCE = 6
 SHOW_MAX_CONNS = 30
@@ -128,8 +127,7 @@ def get_active_users():
         for u in psutil.users():
             host=u.host or "local"
             users_list.append({
-                "name":u.name,
-                "tty":u.terminal or "",
+                "name":u.name,"tty":u.terminal or "",
                 "host":host,
                 "started":datetime.fromtimestamp(u.started).strftime("%Y-%m-%d %H:%M:%S")
             })
@@ -340,9 +338,11 @@ def ai_worker_loop():
     global last_ai_output
     spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
     idx = 0
+    last_valid_output = "[AI] Booting up..."
+
     while True:
         try:
-            # Live context for AI
+            # Build live context
             sysi = system_info()
             usage = usage_info()
             gpus = gpu_info()
@@ -353,11 +353,11 @@ def ai_worker_loop():
                 f"Conns={len(conns)} GPU={[g['util'] for g in gpus]}"
             )
 
+            # show spinner only in console/debug, not in panel
             with ai_lock:
-                last_ai_output = f"[AI] Waiting {spinner[idx]}"
-            idx = (idx + 1) % len(spinner)
+                last_ai_output = last_valid_output
 
-            # ✅ Pass context
+            # run model
             prompt = ai_prompt_text(ctx)
             cmd = ["ollama", "run", MODEL_NAME]
             result = subprocess.run(
@@ -368,22 +368,25 @@ def ai_worker_loop():
                 timeout=AI_TIMEOUT_SEC
             )
             suggestion = (result.stdout + "\n" + result.stderr).strip()
-            if not suggestion:
-                suggestion = f"# No suggestion\nREFRESH_INTERVAL={REFRESH_INTERVAL}"
 
-            # Separate code and commentary
-            code, commentary = parse_ai_output(suggestion)
-            applied = safe_apply_ai_update(code) if code else []
+            if suggestion:
+                code, commentary = parse_ai_output(suggestion)
+                applied = safe_apply_ai_update(code) if code else []
 
-            # Update displayed AI output
-            display = []
-            if commentary:
-                display.append(commentary)
-            if applied:
-                display.append("Applied:\n" + "\n".join(applied))
+                display = []
+                if commentary:
+                    display.append(commentary)
+                if applied:
+                    display.append("Applied:\n" + "\n".join(applied))
 
+                if display:
+                    last_valid_output = "[AI] Analysis complete.\n" + "\n".join(display)
+                else:
+                    last_valid_output = "[AI] No useful output"
+
+            # update visible panel
             with ai_lock:
-                last_ai_output = "[AI] Analysis complete.\n" + "\n".join(display) if display else "[AI] No useful output"
+                last_ai_output = last_valid_output
 
         except Exception as e:
             with ai_lock:
@@ -395,6 +398,11 @@ def ai_worker_loop():
 threading.Thread(target=ai_worker_loop, daemon=True).start()
 
 # ---------------- RENDER ----------------
+def usage_color(pct: float) -> str:
+    if pct < 50: return "green"
+    elif pct < 75: return "yellow"
+    else: return "red"
+
 def render_header(sysi):
     text=Text.assemble(("ShadowTEAM Live Monitor","bold magenta"),f" — {sysi['user']}@{sysi['host']} | {sysi['os']} | uptime: {sysi['uptime']}")
     return Panel(text,style="cyan",box=box.ROUNDED)
@@ -402,11 +410,11 @@ def render_header(sysi):
 def render_usage(usage,gpus):
     table=Table.grid(expand=True)
     table.add_column(justify="left"); table.add_column(justify="right")
-    table.add_row("CPU:",f"{usage['cpu_total']:.1f}% ({', '.join(str(int(p)) for p in usage['cpu_per'])})")
-    table.add_row("RAM:",f"{human_bytes(usage['ram_used'])}/{human_bytes(usage['ram_total'])} ({usage['ram_pct']}%)")
-    table.add_row("Disk:",f"{human_bytes(usage['disk_used'])}/{human_bytes(usage['disk_total'])} ({usage['disk_pct']}%)")
+    table.add_row("CPU:",f"[{usage_color(usage['cpu_total'])}]{usage['cpu_total']:.1f}%[/{usage_color(usage['cpu_total'])}] ({', '.join(str(int(p)) for p in usage['cpu_per'])})")
+    table.add_row("RAM:",f"[{usage_color(usage['ram_pct'])}]{human_bytes(usage['ram_used'])}/{human_bytes(usage['ram_total'])} ({usage['ram_pct']}%)[/{usage_color(usage['ram_pct'])}]")
+    table.add_row("Disk:",f"[{usage_color(usage['disk_pct'])}]{human_bytes(usage['disk_used'])}/{human_bytes(usage['disk_total'])} ({usage['disk_pct']}%)[/{usage_color(usage['disk_pct'])}]")
     for g in gpus:
-        table.add_row(f"GPU {g['name']}:",f"{g['util']}% {human_bytes(g['mem_used'])}/{human_bytes(g['mem_total'])} | {g['temp']}°C")
+        table.add_row(f"GPU {g['name']}:",f"[{usage_color(g['util'])}]{g['util']}%[/{usage_color(g['util'])}] {human_bytes(g['mem_used'])}/{human_bytes(g['mem_total'])} | {g['temp']}°C")
     return Panel(table,title="System Usage",style="green",box=box.ROUNDED)
 
 def render_users(users,scores):
@@ -414,17 +422,25 @@ def render_users(users,scores):
     table.add_column("User"); table.add_column("TTY"); table.add_column("Host"); table.add_column("Started"); table.add_column("Score",justify="right")
     for u in users:
         score=scores.get(u["name"],0)
-        style="bold red" if score>=SUSPICION_THRESHOLDS.get("user_score",1) else ""
+        if score >= SUSPICION_THRESHOLDS.get("user_score",1):
+            style="red" if score >= 3 else "yellow"
+        else:
+            style="cyan"
         table.add_row(u["name"],u["tty"],u["host"],u["started"],str(score),style=style)
     return Panel(table,title="Active Users",style="yellow",box=box.ROUNDED)
 
 def render_conns(conns):
     table=Table(box=box.MINIMAL,expand=True)
     table.add_column("Proto"); table.add_column("Process"); table.add_column("Local"); table.add_column("Remote"); table.add_column("Status"); table.add_column("Score",justify="right")
+    proto_colors={"SSH":"cyan","HTTP":"green","HTTPS":"bright_green","TOR":"red","ContainerNet":"yellow","UDP":"magenta","TCP":"white"}
     for c in conns:
         score=c.get("score",0)
-        style="bold red" if score>=SUSPICION_THRESHOLDS.get("conn_score",2) else ""
-        table.add_row(c["proto"],c["process"],f"{c['l_ip']}:{c['l_port']}",f"{c['r_ip']}:{c['r_port']}",c["status"],str(score),style=style)
+        if score >= SUSPICION_THRESHOLDS.get("conn_score",2):
+            style="red" if score >= 4 else "yellow"
+        else:
+            style="cyan"
+        proto_style=proto_colors.get(c["proto"],"white")
+        table.add_row(f"[{proto_style}]{c['proto']}[/{proto_style}]",c["process"],f"{c['l_ip']}:{c['l_port']}",f"{c['r_ip']}:{c['r_port']}",c["status"],str(score),style=style)
     return Panel(table,title="Connections",style="blue",box=box.ROUNDED)
 
 def render_ai(ai_text):
