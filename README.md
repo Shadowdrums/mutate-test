@@ -86,7 +86,7 @@ Requires `ollama` CLI and a supported AI model (default: `starcoder2:15b`).
 Run the monitor:
 
 ```bash
-python3 live_monitor.py
+python3 self_mutate_hotreload7.py
 ```
 
 * Dashboard refresh rate is controlled by `REFRESH_INTERVAL` (default 1 sec)
